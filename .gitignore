@@ -1,0 +1,43 @@
+# OS
+.DS_Store
+Thumbs.db
+
+# Node / build
+node_modules/
+dist/
+*.map
+
+<<<<<<< HEAD
+# Composer (if you ever add it)
+vendor/
+composer.lock
+=======
+# PHP / composer
+/vendor/
+/composer.lock
+>>>>>>> e713e32 (chore: update README and settings docs)
+
+# IDEs
+.vscode/
+.idea/
+
+# Logs & caches
+*.log
+.cache/
+tmp/
+
+<<<<<<< HEAD
+# WP runtime
+wp-content/uploads/
+=======
+# WordPress uploads or runtime
+wp-content/uploads/
+# Your plugin lives in wp-content/plugins, but don't commit uploads or runtime artifacts
+>>>>>>> e713e32 (chore: update README and settings docs)
+
+# Archives & backups
+*.zip
+*.tar
+*.tar.gz
+*.bak
+*.old
