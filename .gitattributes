@@ -1,0 +1,4 @@
+*.php text=auto eol=lf
+*.js  text=auto eol=lf
+*.css text=auto eol=lf
+*.md  text=auto eol=lf
