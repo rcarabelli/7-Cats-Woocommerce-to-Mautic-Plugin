@@ -55,8 +55,8 @@ function orders2whatsapp_settings_page() {
 
         <!-- ================= Mautic ================= -->
         <form method="post" action="options.php">
-            <?php settings_fields('orders2whatsapp_settings_group'); ?>
-            <?php do_settings_sections('orders2whatsapp_settings_group'); ?>
+            <?php settings_fields(S2M_GROUP_MAUTIC); ?>
+            <?php do_settings_sections(S2M_GROUP_MAUTIC); ?>
 
             <h2 class="title">Mautic</h2>
             <p>Configure how to authenticate with your Mautic instance.</p>
@@ -112,6 +112,8 @@ function orders2whatsapp_settings_page() {
                 <tr>
                     <th scope="row"><label for="orders2whatsapp_mautic_log_enabled">Enable request/response logs</label></th>
                     <td>
+                        <!-- marcador para permitir apagar el checkbox -->
+                        <input type="hidden" name="orders2whatsapp_mautic_log_enabled_present" value="1" />
                         <label>
                             <input id="orders2whatsapp_mautic_log_enabled" type="checkbox" name="orders2whatsapp_mautic_log_enabled" value="1" <?php checked(1, $log_enabled); ?> />
                             Save one .txt per Mautic call with the payload and the raw API response.
@@ -134,8 +136,8 @@ function orders2whatsapp_settings_page() {
 
         <!-- ================= Zender (WhatsApp) — now above Policies ================= -->
         <form method="post" action="options.php">
-            <?php settings_fields('orders2whatsapp_settings_group'); ?>
-            <?php do_settings_sections('orders2whatsapp_settings_group'); ?>
+            <?php settings_fields(S2M_GROUP_ZENDER); ?>
+            <?php do_settings_sections(S2M_GROUP_ZENDER); ?>
 
             <h2 class="title">WhatsApp (Zender)</h2>
             <table class="form-table" role="presentation">
@@ -165,17 +167,23 @@ function orders2whatsapp_settings_page() {
 
         <!-- ================= Notification Policies (WhatsApp) ================= -->
         <form method="post" action="options.php">
-            <?php settings_fields('orders2whatsapp_settings_group'); ?>
-            <?php do_settings_sections('orders2whatsapp_settings_group'); ?>
+            <?php settings_fields(S2M_GROUP_POLICY); ?>
+            <?php do_settings_sections(S2M_GROUP_POLICY); ?>
 
             <h2 class="title">Notification policies (WhatsApp)</h2>
+            <!-- marcador para permitir vaciar todas las opciones -->
+            <input type="hidden" name="orders2whatsapp_notify_statuses_present" value="1" />
+
             <table class="form-table" role="presentation">
                 <tr>
                     <th scope="row">Statuses to notify</th>
                     <td>
                         <?php if (!empty($status_slugs)) : ?>
                             <?php foreach ($status_slugs as $slug => $label) : ?>
-                                <?php $checked = in_array($slug, $notify_sel, true) ? 'checked' : ''; $id = 'orders2whatsapp_status_' . esc_attr($slug); ?>
+                                <?php
+                                    $checked = in_array($slug, $notify_sel, true) ? 'checked' : '';
+                                    $id = 'orders2whatsapp_status_' . esc_attr($slug);
+                                ?>
                                 <label for="<?php echo $id; ?>" style="display:inline-block; margin:0 16px 8px 0;">
                                     <input id="<?php echo $id; ?>" type="checkbox" name="orders2whatsapp_notify_statuses[]"
                                            value="<?php echo esc_attr($slug); ?>" <?php echo $checked; ?> />

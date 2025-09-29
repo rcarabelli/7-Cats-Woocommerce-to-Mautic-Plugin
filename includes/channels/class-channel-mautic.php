@@ -4,7 +4,8 @@
  * - Login/refresh OAuth2 ANTES de llamar al API (password grant si existiera; fallback a client_credentials).
  * - Remapea y FILTRA (lista blanca) los campos hacia los aliases REALES de Mautic.
  * - Mueve last_order_json a Nota para evitar problemas de longitud/estructura.
- * - (Nuevo) Etiqueta el contacto según el origen: magento | woocommerce (+ tags extra opcionales).
+ * - Etiqueta el contacto según el origen (magento | woocommerce) + tags extra opcionales.
+ *   NOTA: En Mautic 5 no usamos /contacts/{id}/tags/add; los tags van en el payload de create/edit.
  */
 class Orders2WhatsApp_Channel_Mautic implements Orders2WhatsApp_Channel_Interface {
     public const KEY = 'mautic';
@@ -49,7 +50,7 @@ class Orders2WhatsApp_Channel_Mautic implements Orders2WhatsApp_Channel_Interfac
 
         // 2) Construir campos ricos según origen
         if ($src === 'magento' || $magento_entity_id) {
-            $eid = $magento_entity_id ?: $order_id; // por si te llega sólo order_id con el mismo valor
+            $eid = $magento_entity_id ?: $order_id;
             if (!$eid) { $this->step('Magento: falta magento_entity_id/order_id en ctx. Abort.'); return; }
             if (!function_exists('\Orders2WhatsApp\o2w_build_mautic_contact_payload_from_magento_order')) {
                 $this->step('Magento: builder no disponible. Abort.');
@@ -85,18 +86,19 @@ class Orders2WhatsApp_Channel_Mautic implements Orders2WhatsApp_Channel_Interfac
                 "last_order_json:\n" . $built['lead_fields']['last_order_json'];
         }
 
-        // 3) Upsert
-        $contactId = $this->upsert_contact($base, $tokenMode, $tokenFieldRaw, $lead_fields, $ctx);
-        if (!$contactId) { $this->step('upsert falló.'); $this->flush_process_trail_to_last_log($ctx); return; }
-
-        // 4) Tags (nuevo)
+        // 3) Tags de origen + extra (se envían dentro de create/edit)
         $originTag = $this->resolve_origin_tag($src);
         $extraTags = $this->parse_extra_tags($payload, $ctx);
         $tags = array_values(array_unique(array_filter(array_merge([$originTag], $extraTags))));
         if ($tags) {
-            $okTags = $this->add_tags_to_contact($base, $tokenMode, $tokenFieldRaw, $contactId, $tags, $ctx);
-            $this->step('tags ' . ($okTags ? 'OK ' : 'FAIL ') . implode(',', $tags));
+            // Los incluimos directamente en el payload a crear/editar
+            $lead_fields['tags'] = $tags;
+            $this->step('tags incluidos en payload: ' . implode(',', $tags));
         }
+
+        // 4) Upsert (con manejo de tags dentro del create/edit)
+        $contactId = $this->upsert_contact($base, $tokenMode, $tokenFieldRaw, $lead_fields, $ctx);
+        if (!$contactId) { $this->step('upsert falló.'); $this->flush_process_trail_to_last_log($ctx); return; }
 
         // 5) Nota opcional
         if (!empty($note_text)) {
@@ -113,7 +115,6 @@ class Orders2WhatsApp_Channel_Mautic implements Orders2WhatsApp_Channel_Interfac
 
     /** ====== Auth helpers ====== */
 
-    /** Decide modo de auth priorizando OAuth2 si hay credenciales completas en ajustes */
     private function resolve_auth_mode(string $tokenFieldRaw): string {
         $hasOauthCreds = $this->have_oauth2_credentials();
         if ($hasOauthCreds) return 'oauth2'; // prioriza OAuth2 si hay credenciales
@@ -123,26 +124,22 @@ class Orders2WhatsApp_Channel_Mautic implements Orders2WhatsApp_Channel_Interfac
         return 'none';
     }
 
-    /** Verifica si existen TODAS las credenciales OAuth2 requeridas en opciones */
     private function have_oauth2_credentials(): bool {
         $o = $this->oauth2_opts();
         return (bool) ($o['client_id'] && $o['client_secret'] && $o['username'] && $o['password']);
     }
 
-    /** Intenta tener un access_token válido antes de cualquier request */
     private function ensure_oauth2_logged_in(string $base): bool {
         $this->step('OAuth2: ensure logged in');
         $token = $this->oauth2_get_valid_access_token($base);
         if ($token) { $this->step('OAuth2: token válido en memoria/opciones'); return true; }
 
-        // 1) password grant
         $this->step('OAuth2: solicitando password grant inicial');
         if ($this->oauth2_password_grant($base)) {
             $this->step('OAuth2: password grant OK');
             return true;
         }
 
-        // 2) fallback: client_credentials
         $this->step('Password grant no autorizado → intento client_credentials.');
         if ($this->oauth2_client_credentials_grant($base)) {
             return true;
@@ -153,9 +150,7 @@ class Orders2WhatsApp_Channel_Mautic implements Orders2WhatsApp_Channel_Interfac
 
     /** ====== Mapeo y FILTRO de campos ====== */
 
-    /** Remap de payload a aliases REALES de Mautic y filtro estricto. */
     private function remap_and_filter_fields(array $f): array {
-        // Funciones unicode seguras
         $u_strlen = static function ($s): int {
             return function_exists('mb_strlen') ? mb_strlen($s, 'UTF-8') : strlen($s);
         };
@@ -166,13 +161,8 @@ class Orders2WhatsApp_Channel_Mautic implements Orders2WhatsApp_Channel_Interfac
             return ($len === null) ? substr($s, $start) : substr($s, $start, $len);
         };
 
-        // ❌ Campos que NO se envían tal cual
-        $deny = [
-            'last_order_currency',
-            'last_order_json',
-        ];
+        $deny = ['last_order_currency','last_order_json'];
 
-        // ✅ Mapa (payload) -> alias Mautic
         $map = [
             'firstname'              => 'firstname',
             'lastname'               => 'lastname',
@@ -187,7 +177,6 @@ class Orders2WhatsApp_Channel_Mautic implements Orders2WhatsApp_Channel_Interfac
             'historic_purch_count'   => 'historic_purch_event',
             'historic_purch_event'   => 'historic_purch_event',
 
-            // Status aliases → last_order_status
             'last_order_status'      => 'last_order_status',
             'status'                 => 'last_order_status',
             'order_status'           => 'last_order_status',
@@ -196,7 +185,6 @@ class Orders2WhatsApp_Channel_Mautic implements Orders2WhatsApp_Channel_Interfac
 
             'last_purchase_date'     => 'last_purchase_date',
 
-            // textareas
             'last_ord_prod_cat'      => 'last_ord_prod_cat',
             'last_ord_products'      => 'last_ord_products',
         ];
@@ -210,7 +198,6 @@ class Orders2WhatsApp_Channel_Mautic implements Orders2WhatsApp_Channel_Interfac
             if ($s === '') return '';
             $s = str_replace('_', '-', $s);
             $s = preg_replace('/^wc-/', '', $s);
-
             $mapStatus = [
                 'pending-payment' => 'pending',
                 'pending'         => 'pending',
@@ -222,14 +209,10 @@ class Orders2WhatsApp_Channel_Mautic implements Orders2WhatsApp_Channel_Interfac
                 'failed'          => 'failed',
             ];
             $v = isset($mapStatus[$s]) ? $mapStatus[$s] : $s;
-
-            if ($u_strlen($v) > 50) {
-                $v = $u_substr($v, 0, 50);
-            }
+            if ($u_strlen($v) > 50) $v = $u_substr($v, 0, 50);
             return $v;
         };
 
-        // Convierte array/json items a líneas "name | url_producto | url_image"
         $items_to_lines = function ($items) {
             if (is_string($items)) {
                 $s = trim($items);
@@ -261,13 +244,14 @@ class Orders2WhatsApp_Channel_Mautic implements Orders2WhatsApp_Channel_Interfac
         foreach ($f as $k => $v) {
             if (in_array($k, $deny, true)) { $this->step("remap: dropping denied key '{$k}'"); continue; }
             if (!isset($map[$k])) {
-                if ($k !== 'last_order_categories' && $k !== 'last_order_items_json') {
+                if ($k !== 'last_order_categories' && $k !== 'last_order_items_json' && $k !== 'tags') {
                     $this->step("remap: dropping unknown key '{$k}'");
                 }
-                continue;
+                // Permitimos 'tags' pasar directo si vino desde lógica superior
+                if ($k !== 'tags') continue;
             }
 
-            $finalKey = $map[$k];
+            $finalKey = $map[$k] ?? $k; // 'tags' no está mapeado: pasa como 'tags'
             $v = $norm($v);
 
             // Sanitización por tipo
@@ -281,7 +265,6 @@ class Orders2WhatsApp_Channel_Mautic implements Orders2WhatsApp_Channel_Interfac
                 $v = (int) $v;
 
             } elseif ($finalKey === 'last_purchase_date') {
-                // 'Y-m-d H:i:s' UTC
                 $ts = null;
                 if (is_numeric($v)) {
                     $ts = (int) $v;
@@ -321,6 +304,13 @@ class Orders2WhatsApp_Channel_Mautic implements Orders2WhatsApp_Channel_Interfac
                     $v = $u_substr($v, 0, 4000);
                     $this->step('remap: last_ord_products truncated to 4000 chars');
                 }
+
+            } elseif ($finalKey === 'tags') {
+                // 'tags' puede venir como array|string. Normalizamos a array de slugs.
+                $arr = is_array($v) ? $v : preg_split('/\s*,\s*/', (string)$v);
+                $arr = array_values(array_unique(array_filter(array_map([$this,'normalize_tag'], $arr))));
+                if (!$arr) continue;
+                $v = $arr;
             }
 
             $out[$finalKey] = $v;
@@ -351,7 +341,6 @@ class Orders2WhatsApp_Channel_Mautic implements Orders2WhatsApp_Channel_Interfac
             }
         }
 
-        // Fallback para status desde last_order_json.status
         if (empty($out['last_order_status']) && !empty($f['last_order_json'])) {
             $raw = $f['last_order_json'];
             $dec = null;
@@ -370,7 +359,6 @@ class Orders2WhatsApp_Channel_Mautic implements Orders2WhatsApp_Channel_Interfac
             }
         }
 
-        // Sanitización final
         if (isset($out['email'])) $out['email'] = strtolower(trim((string) $out['email']));
         if (isset($out['phone'])) $out['phone'] = trim((string) $out['phone']);
 
@@ -383,7 +371,6 @@ class Orders2WhatsApp_Channel_Mautic implements Orders2WhatsApp_Channel_Interfac
         return rtrim($base, '/') . '/api/';
     }
 
-    /** Devuelve headers finales según el modo de auth */
     private function build_headers(string $base, string $mode, string $tokenFieldRaw): array {
         $headers = ['Content-Type: application/json'];
 
@@ -405,7 +392,6 @@ class Orders2WhatsApp_Channel_Mautic implements Orders2WhatsApp_Channel_Interfac
         return $headers;
     }
 
-    /** Llamada HTTP genérica (JSON) con logging */
     private function api_request(string $base, string $mode, string $tokenFieldRaw, string $method, string $path, ?array $payload = null, array $ctx = []): array {
         $url = $this->api_base($base) . ltrim($path, '/');
         $headers = $this->build_headers($base, $mode, $tokenFieldRaw);
@@ -432,13 +418,10 @@ class Orders2WhatsApp_Channel_Mautic implements Orders2WhatsApp_Channel_Interfac
         return ['code'=>$code, 'body'=>$resp, 'json'=>$decoded, 'error'=>$curl_err ?: null, 'url'=>$url];
     }
 
-    /** Igual que api_request() pero enviando application/x-www-form-urlencoded */
     private function api_request_form(string $base, string $mode, string $tokenFieldRaw, string $method, string $path, array $formFields, array $ctx = []): array {
         $url = $this->api_base($base) . ltrim($path, '/');
 
-        // Partimos de los headers de auth y reemplazamos el Content-Type
         $headers = $this->build_headers($base, $mode, $tokenFieldRaw);
-        // quita cualquier Content-Type previo
         $headers = array_values(array_filter($headers, static fn($h) => stripos($h, 'Content-Type:') !== 0));
         $headers[] = 'Content-Type: application/x-www-form-urlencoded';
 
@@ -461,12 +444,10 @@ class Orders2WhatsApp_Channel_Mautic implements Orders2WhatsApp_Channel_Interfac
         $decoded = null;
         if ($resp && ($tmp = json_decode($resp, true)) !== null) $decoded = $tmp;
 
-        // Log
         $this->maybe_log_raw($url, $headers, $postBody, $code, $resp, $curl_err, ['json'=>null], $ctx);
         return ['code'=>$code, 'body'=>$resp, 'json'=>$decoded, 'error'=>$curl_err ?: null, 'url'=>$url];
     }
 
-    /** Reintento automático si es 401 y estamos en OAuth2 */
     private function api_request_with_retry_oauth(string $base, string $mode, string $tokenFieldRaw, string $method, string $path, ?array $payload = null, array $ctx = []): array {
         $res = $this->api_request($base, $mode, $tokenFieldRaw, $method, $path, $payload, $ctx);
         if ($mode === 'oauth2' && $res['code'] === 401) {
@@ -480,7 +461,6 @@ class Orders2WhatsApp_Channel_Mautic implements Orders2WhatsApp_Channel_Interfac
 
     /** ====== Contacto ====== */
 
-    /** Busca contacto por email. Devuelve ID o null. */
     private function find_contact_id_by_email(string $base, string $mode, string $tokenFieldRaw, string $email, array $ctx = []): ?int {
         if (!$email) return null;
         $q = 'contacts?search=' . rawurlencode('email:' . $email);
@@ -498,10 +478,19 @@ class Orders2WhatsApp_Channel_Mautic implements Orders2WhatsApp_Channel_Interfac
         return $firstId ?: null;
     }
 
-    /** Crea contacto */
     private function create_contact(string $base, string $mode, string $tokenFieldRaw, array $fields, array $ctx = []): ?int {
         $this->step('create_contact → POST contacts/new');
+
+        // Primer intento: tags como array (si existen)
         $res = $this->api_request_with_retry_oauth($base, $mode, $tokenFieldRaw, 'POST', 'contacts/new', $fields, $ctx);
+
+        // Si falla por validación de tags, reintenta con string coma-separada
+        if (!in_array($res['code'], [200, 201], true) && isset($fields['tags']) && is_array($fields['tags'])) {
+            $this->step('create: reintento con tags como string');
+            $fields2 = $fields;
+            $fields2['tags'] = implode(',', $fields['tags']);
+            $res = $this->api_request_with_retry_oauth($base, $mode, $tokenFieldRaw, 'POST', 'contacts/new', $fields2, $ctx);
+        }
 
         if ($res['error']) { $this->step('create error cURL: '.$res['error']); return null; }
         if (!in_array($res['code'], [200, 201], true)) {
@@ -513,10 +502,19 @@ class Orders2WhatsApp_Channel_Mautic implements Orders2WhatsApp_Channel_Interfac
         return $id ?: null;
     }
 
-    /** Edita contacto */
     private function edit_contact(string $base, string $mode, string $tokenFieldRaw, int $id, array $fields, array $ctx = []): bool {
         $this->step('edit_contact → PATCH contacts/'.$id.'/edit');
+
+        // Primer intento: tags como array (si existen)
         $res = $this->api_request_with_retry_oauth($base, $mode, $tokenFieldRaw, 'PATCH', 'contacts/'.$id.'/edit', $fields, $ctx);
+
+        // Si falla por validación de tags, reintenta con string coma-separada
+        if (!in_array($res['code'], [200, 202], true) && isset($fields['tags']) && is_array($fields['tags'])) {
+            $this->step('edit: reintento con tags como string');
+            $fields2 = $fields;
+            $fields2['tags'] = implode(',', $fields['tags']);
+            $res = $this->api_request_with_retry_oauth($base, $mode, $tokenFieldRaw, 'PATCH', 'contacts/'.$id.'/edit', $fields2, $ctx);
+        }
 
         if ($res['error']) { $this->step('edit error cURL: '.$res['error']); return false; }
         if (!in_array($res['code'], [200, 202], true)) {
@@ -527,7 +525,6 @@ class Orders2WhatsApp_Channel_Mautic implements Orders2WhatsApp_Channel_Interfac
         return true;
     }
 
-    /** Upsert por email */
     private function upsert_contact(string $base, string $mode, string $tokenFieldRaw, array $fields, array $ctx = []): ?int {
         $email = $fields['email'] ?? '';
         if (!$email) { $this->step('upsert sin email'); return null; }
@@ -549,22 +546,17 @@ class Orders2WhatsApp_Channel_Mautic implements Orders2WhatsApp_Channel_Interfac
         return $this->create_contact($base, $mode, $tokenFieldRaw, $fields, $ctx);
     }
 
-    /** ====== Tags (nuevo) ====== */
+    /** ====== Tags helpers ====== */
 
-    /** Devuelve el tag de origen aplicando opciones y filtro. */
     private function resolve_origin_tag(string $src): string {
         $tagWoo = trim((string) get_option('orders2whatsapp_mautic_tag_woo', 'woocommerce'));
         $tagMag = trim((string) get_option('orders2whatsapp_mautic_tag_magento', 'magento'));
-
         $tag = ($src === 'magento') ? $tagMag : $tagWoo;
         $tag = $this->normalize_tag($tag ?: (($src === 'magento') ? 'magento' : 'woocommerce'));
-
-        /** Permite override desde código */
         $tag = apply_filters('o2w_mautic_origin_tag', $tag, $src);
         return $this->normalize_tag($tag);
     }
 
-    /** Normaliza un tag: minúsculas, espacios→guiones, recorta, limpia. */
     private function normalize_tag(string $s): string {
         $s = strtolower(trim($s));
         $s = str_replace(['"',"'"], '', $s);
@@ -574,7 +566,6 @@ class Orders2WhatsApp_Channel_Mautic implements Orders2WhatsApp_Channel_Interfac
         return $s;
     }
 
-    /** Recolecta tags extra desde payload/ctx (array o 'a,b,c'). */
     private function parse_extra_tags(array $payload, array $ctx): array {
         $out = [];
         $c1 = $ctx['vars']['mautic_tags'] ?? null;
@@ -596,74 +587,29 @@ class Orders2WhatsApp_Channel_Mautic implements Orders2WhatsApp_Channel_Interfac
         return $out;
     }
 
-    /** Intenta añadir tags al contacto con varios formatos/endpoints. */
-    private function add_tags_to_contact(string $base, string $mode, string $tokenFieldRaw, int $contactId, array $tags, array $ctx = []): bool {
-        $tags = array_values(array_unique(array_filter(array_map([$this,'normalize_tag'], $tags))));
-        if (!$tags) return true;
-
-        $joined = implode(',', $tags);
-
-        // Endpoint variante A
-        $pathA = 'contacts/' . $contactId . '/tags/add';
-        // Endpoint variante B (algunas instalaciones usan singular)
-        $pathB = 'contacts/' . $contactId . '/tag/add';
-
-        // 1) JSON {'tags': 'a,b'}
-        foreach ([$pathA, $pathB] as $p) {
-            $res = $this->api_request_with_retry_oauth($base, $mode, $tokenFieldRaw, 'POST', $p, ['tags' => $joined], $ctx);
-            if (in_array($res['code'], [200, 201], true)) return true;
-            $this->step("tags fallback #1 ($p) http ".$res['code'].' body: '.substr((string)$res['body'],0,180));
-        }
-
-        // 2) JSON {'tags': ['a','b']}
-        foreach ([$pathA, $pathB] as $p) {
-            $res = $this->api_request_with_retry_oauth($base, $mode, $tokenFieldRaw, 'POST', $p, ['tags' => $tags], $ctx);
-            if (in_array($res['code'], [200, 201], true)) return true;
-            $this->step("tags fallback #2 ($p) http ".$res['code'].' body: '.substr((string)$res['body'],0,180));
-        }
-
-        // 3) JSON {'tag': 'a'} si sólo es 1
-        if (count($tags) === 1) {
-            foreach ([$pathA, $pathB] as $p) {
-                $res = $this->api_request_with_retry_oauth($base, $mode, $tokenFieldRaw, 'POST', $p, ['tag' => $tags[0]], $ctx);
-                if (in_array($res['code'], [200, 201], true)) return true;
-                $this->step("tags fallback #3 ($p) http ".$res['code'].' body: '.substr((string)$res['body'],0,180));
-            }
-        }
-
-        // 4) FORM tags=a,b
-        foreach ([$pathA, $pathB] as $p) {
-            $res = $this->api_request_form_with_retry_oauth($base, $mode, $tokenFieldRaw, 'POST', $p, http_build_query(['tags' => $joined], '', '&'), $ctx);
-            if (in_array($res['code'], [200, 201], true)) return true;
-            $this->step("tags fallback #4 ($p form) http ".$res['code'].' body: '.substr((string)$res['body'],0,180));
-        }
-
-        return false;
-    }
-
     /** ====== Notas ====== */
 
-    /** Crea una nota para el contacto (con 3 variantes de payload). */
+    /** Crea una nota para el contacto (prioriza JSON plano; luego wrapper; luego form). */
     private function create_note(string $base, string $mode, string $tokenFieldRaw, int $contactId, string $text, array $ctx = []): bool {
         $clean = trim($text);
         if ($clean === '') {
             $this->step('note: texto vacío tras trim → no envío');
             return false;
         }
-
-        // 1) JSON con wrapper "note"
-        $payload1 = ['note' => ['type' => 'general', 'text' => $clean, 'lead' => $contactId]];
+    
+        // 1) JSON plano (el que tu Mautic acepta)
+        $payload1 = ['type' => 'general', 'text' => $clean, 'lead' => $contactId];
         $res1 = $this->api_request_with_retry_oauth($base, $mode, $tokenFieldRaw, 'POST', 'notes/new', $payload1, $ctx);
-        if (in_array($res1['code'], [200, 201], true)) { $this->step('note OK (json/wrapper)'); return true; }
+        if (in_array($res1['code'], [200, 201], true)) { $this->step('note OK (json/plain)'); return true; }
         $this->step('note fallback #1 http '.$res1['code'].' body: '.substr((string)$res1['body'],0,200));
-
-        // 2) JSON plano
-        $payload2 = ['type' => 'general', 'text' => $clean, 'lead' => $contactId];
+    
+        // 2) JSON con wrapper "note"
+        $payload2 = ['note' => ['type' => 'general', 'text' => $clean, 'lead' => $contactId]];
         $res2 = $this->api_request_with_retry_oauth($base, $mode, $tokenFieldRaw, 'POST', 'notes/new', $payload2, $ctx);
-        if (in_array($res2['code'], [200, 201], true)) { $this->step('note OK (json/plain)'); return true; }
+        if (in_array($res2['code'], [200, 201], true)) { $this->step('note OK (json/wrapper)'); return true; }
         $this->step('note fallback #2 http '.$res2['code'].' body: '.substr((string)$res2['body'],0,200));
-
-        // 3) FORM note[...]
+    
+        // 3) FORM application/x-www-form-urlencoded
         $res3 = $this->api_request_form_with_retry_oauth(
             $base, $mode, $tokenFieldRaw, 'POST', 'notes/new',
             http_build_query([
@@ -678,11 +624,9 @@ class Orders2WhatsApp_Channel_Mautic implements Orders2WhatsApp_Channel_Interfac
         return $ok3;
     }
 
-    /** Envío form-urlencoded con retry OAuth (para notas, etc.). */
     private function api_request_form_with_retry_oauth(string $base, string $mode, string $tokenFieldRaw, string $method, string $path, string $postQuery, array $ctx = []): array {
         $url = $this->api_base($base) . ltrim($path, '/');
         $headers = $this->build_headers($base, $mode, $tokenFieldRaw);
-        // Sustituir Content-Type por form
         $headers = array_values(array_filter(array_map(function($h){
             return (stripos($h, 'Content-Type:') === 0) ? null : $h;
         }, $headers)));
@@ -707,7 +651,6 @@ class Orders2WhatsApp_Channel_Mautic implements Orders2WhatsApp_Channel_Interfac
 
         $this->maybe_log_raw($url, $headers, $postQuery, $code, $resp, $curl_err, ['json'=>null], $ctx);
 
-        // Retry si 401 y estamos en OAuth2
         if ($mode === 'oauth2' && $code === 401) {
             $this->step('401 detectado (form) → intento refresh OAuth2');
             if ($this->oauth2_refresh($base)) {
@@ -877,7 +820,6 @@ class Orders2WhatsApp_Channel_Mautic implements Orders2WhatsApp_Channel_Interfac
             $this->step('creando dir de logs: ' . $dir);
         }
 
-        // Detectar origen y referencia para el nombre de archivo
         $src  = $ctx['vars']['source'] ?? '';
         $ref  = $ctx['vars']['magento_entity_id'] ?? ($ctx['vars']['order_id'] ?? ($payload['json']['order']['id'] ?? 'unknown'));
         $tag  = ($src === 'magento' || isset($ctx['vars']['magento_entity_id'])) ? 'magento' : 'woo';
